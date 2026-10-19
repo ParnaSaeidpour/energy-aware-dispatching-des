@@ -13,6 +13,9 @@ NUM_MACHINES = 3
 MEAN_INTERARRIVAL = 10.0           # average minutes between two part arrivals
 MEAN_PROC_TIME = [6.0, 8.0, 6.0]   # average processing minutes on M1, M2, M3 (M2 = bottleneck)
 DUE_DATE_FACTOR = (2.0, 6.0)       # due date = arrival + factor * total work, factor ~ Uniform(2, 6)
+MTBF = 8 * 60.0                    # Mean Time Between Failures: one breakdown every 8 hours on average
+MTTR = 30.0                        # Mean Time To Repair: 30 minutes on average
+# -> availability = MTBF / (MTBF + MTTR) = 480 / 510 = about 94%
 
 
 class Part:
@@ -31,17 +34,29 @@ class Part:
 
 
 class Machine:
-    """A machine with its own waiting queue. It processes one part at a time."""
+    """A machine with its own waiting queue. It processes one part at a time and can break down."""
 
-    def __init__(self, env, index, line):
+    def __init__(self, env, index, line, seed):
         self.env = env
         self.index = index               # 0, 1, 2
         self.name = f"M{index + 1}"
         self.line = line
         self.queue = []                  # parts waiting for this machine
-        self.busy_time = 0.0             # total minutes spent processing
         self.wake_up = None              # event that wakes the machine when a part arrives
-        env.process(self.run())          # start the machine's life-cycle process
+        self.failure_rng = random.Random(seed * 100 + index)   # own random stream for failures
+        self.num_failures = 0
+        # State bookkeeping: the machine is always 'idle', 'busy' or 'broken'.
+        self.state = "idle"
+        self.state_since = 0.0
+        self.time_in_state = {"idle": 0.0, "busy": 0.0, "broken": 0.0}
+        self.process = env.process(self.run())   # the machine's life cycle
+        env.process(self.breakdowns())           # a second process that causes failures
+
+    def set_state(self, new_state):
+        """Change state and add the time spent in the old state to the statistics."""
+        self.time_in_state[self.state] += self.env.now - self.state_since
+        self.state = new_state
+        self.state_since = self.env.now
 
     def add_part(self, part):
         """Put a part in the queue and wake the machine if it is waiting."""
@@ -50,23 +65,53 @@ class Machine:
             self.wake_up.succeed()
 
     def run(self):
-        """The machine's life cycle: wait for work -> pick a part -> process it -> pass it on."""
+        """The machine's life cycle: wait for work -> pick a part -> process it -> pass it on.
+        A failure can interrupt it at any moment (while idle or while busy)."""
         while True:
             # 1) If the queue is empty, sleep until add_part() wakes us up.
             while not self.queue:
+                self.set_state("idle")
                 self.wake_up = self.env.event()
-                yield self.wake_up
+                try:
+                    yield self.wake_up
+                except simpy.Interrupt as failure:     # broke down while idle
+                    yield from self.repair(failure.cause)
 
             # 2) Choose the next part. For now: first in, first out (FIFO).
             part = self.queue.pop(0)
-
-            # 3) Process the part: the simulation clock jumps forward by the processing time.
             self.line.log(f"{part.id:>4} starts on {self.name}")
-            yield self.env.timeout(part.proc_times[self.index])
-            self.busy_time += part.proc_times[self.index]
+
+            # 3) Process the part. If a failure interrupts us, we keep the work already
+            #    done, wait for the repair, and then continue with the remaining time.
+            remaining = part.proc_times[self.index]
+            while remaining > 0:
+                self.set_state("busy")
+                start = self.env.now
+                try:
+                    yield self.env.timeout(remaining)
+                    remaining = 0
+                except simpy.Interrupt as failure:     # broke down while busy
+                    remaining -= self.env.now - start
+                    yield from self.repair(failure.cause)
 
             # 4) Send the part to the next machine (or out of the line).
             self.line.part_done(part, self.index)
+
+    def repair(self, duration):
+        """The machine is broken for 'duration' minutes."""
+        self.set_state("broken")
+        self.line.log(f"     {self.name} BREAKS DOWN (repair takes {duration:.1f} min)")
+        yield self.env.timeout(duration)
+        self.line.log(f"     {self.name} repaired")
+
+    def breakdowns(self):
+        """Failure process: time to failure ~ Exponential(MTBF), repair time ~ Exponential(MTTR)."""
+        while True:
+            yield self.env.timeout(self.failure_rng.expovariate(1.0 / MTBF))
+            repair_time = self.failure_rng.expovariate(1.0 / MTTR)
+            self.num_failures += 1
+            self.process.interrupt(cause=repair_time)  # stop the machine's run() process
+            yield self.env.timeout(repair_time)        # no new failure during the repair
 
 
 class ProductionLine:
@@ -76,7 +121,7 @@ class ProductionLine:
         self.env = env
         self.verbose = verbose
         self.arrival_rng = random.Random(seed)   # own random stream for arrivals and part data
-        self.machines = [Machine(env, i, self) for i in range(NUM_MACHINES)]
+        self.machines = [Machine(env, i, self, seed) for i in range(NUM_MACHINES)]
         self.finished = []                        # parts that left the line
         env.process(self.arrivals())
 
@@ -105,21 +150,23 @@ class ProductionLine:
 
 
 if __name__ == "__main__":
-    # Short demo: print the first hour event by event, then run one full day.
+    # Short demo: print the first hour event by event, then run one full week.
     env = simpy.Environment()
     ProductionLine(env, seed=42, verbose=True)
     env.run(until=60)
 
     env = simpy.Environment()
     line = ProductionLine(env, seed=42)
-    sim_time = 24 * 60
+    sim_time = 7 * 24 * 60
     env.run(until=sim_time)
 
     done = line.finished
     lead_times = [p.finish_time - p.arrival_time for p in done]
     tardiness = [max(0.0, p.finish_time - p.due_date) for p in done]
-    print(f"\nOne day: {len(done)} parts finished")
+    print(f"\nOne week: {len(done)} parts finished")
     print(f"Average lead time: {sum(lead_times) / len(done):.1f} min")
     print(f"Average tardiness: {sum(tardiness) / len(done):.1f} min")
     for m in line.machines:
-        print(f"{m.name} utilization: {m.busy_time / sim_time:.0%}, parts waiting at end: {len(m.queue)}")
+        m.set_state(m.state)   # close the last open state period
+        shares = ", ".join(f"{s} {t / sim_time:.0%}" for s, t in m.time_in_state.items())
+        print(f"{m.name}: {shares}, failures: {m.num_failures}, waiting at end: {len(m.queue)}")
