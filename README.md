@@ -6,6 +6,13 @@ It compares classic dispatching rules (FIFO, SPT, EDD) with an **energy-aware ru
 The rules are evaluated on **throughput, lead time, tardiness, machine utilization and energy cost**,
 with 30 replications, 95% confidence intervals and a Pareto (trade-off) analysis.
 
+![Animation of the production line with EDD and ECO(-120)](line.gif)
+
+*One simulated day, 06:00 to 22:00, with the same parts and breakdowns for both rules. At 08:00
+electricity becomes expensive: EDD keeps working, while the energy-aware ECO rule waits (purple) and
+its queues grow. After 20:00 electricity is cheap again and ECO catches up. Squares are waiting parts,
+colored by urgency (blue = on track, orange = tight, red = will be late).*
+
 ![Trade-off between tardiness and energy cost](tradeoff.png)
 
 ## The model
@@ -48,6 +55,7 @@ pip install -r requirements.txt
 
 python model.py          # prints the first simulated hour event by event
 python experiment.py     # full experiment: results table, paired comparisons, tradeoff.png
+python animate.py        # animated GIF of one day, EDD vs ECO(-120): line.gif
 ```
 
 The full experiment (7 rules × 30 replications) takes a few seconds. Fixed seeds make every result exactly reproducible.
@@ -57,6 +65,7 @@ The full experiment (7 rules × 30 replications) takes a few seconds. Fixed seed
 | `model.py` | The SimPy model: parts, machines, breakdowns, energy and price |
 | `rules.py` | The dispatching rules (FIFO, SPT, EDD, ECO) |
 | `experiment.py` | Replications, warm-up, confidence intervals, Pareto front, plot |
+| `animate.py` | Animated GIF of the line (visualization only, not used for the results) |
 
 ## Experimental design
 
