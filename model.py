@@ -156,6 +156,15 @@ class ProductionLine:
         env.process(self.arrivals())
         env.process(self.tariff_changes())
 
+    def reset_stats(self):
+        """Forget everything measured so far. Called at the end of the warm-up period."""
+        for m in self.machines:
+            m.set_state(m.state)   # close the open period first
+            m.time_in_state = {"idle": 0.0, "busy": 0.0, "broken": 0.0}
+            m.energy_kwh = 0.0
+            m.energy_cost = 0.0
+        self.finished = []
+
     def expensive_now(self):
         return electricity_price(self.env.now) == PEAK_PRICE
 
@@ -201,26 +210,7 @@ class ProductionLine:
 
 
 if __name__ == "__main__":
-    # Short demo: print the first hour event by event, then run one full week.
+    # Short demo: print the first hour event by event. (Full experiments: run experiment.py)
     env = simpy.Environment()
     ProductionLine(env, seed=42, verbose=True)
     env.run(until=60)
-
-    # Same seed for every rule -> same parts and same failures (a fair comparison).
-    sim_time = 7 * 24 * 60
-    for name, rule in RULES.items():
-        env = simpy.Environment()
-        line = ProductionLine(env, rule=rule, seed=42)
-        env.run(until=sim_time)
-
-        done = line.finished
-        lead_times = [p.finish_time - p.arrival_time for p in done]
-        tardiness = [max(0.0, p.finish_time - p.due_date) for p in done]
-        print(f"\n{name} - one week: {len(done)} parts finished")
-        print(f"  Average lead time: {sum(lead_times) / len(done):.1f} min")
-        print(f"  Average tardiness: {sum(tardiness) / len(done):.1f} min")
-        print(f"  Tardy parts:       {sum(t > 0 for t in tardiness) / len(done):.0%}")
-        for m in line.machines:
-            m.set_state(m.state)   # close the last open period
-        print(f"  Energy: {sum(m.energy_kwh for m in line.machines):.0f} kWh, "
-              f"cost {sum(m.energy_cost for m in line.machines):.2f} EUR")
