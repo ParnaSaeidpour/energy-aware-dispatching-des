@@ -19,6 +19,19 @@ MTBF = 8 * 60.0                    # Mean Time Between Failures: one breakdown e
 MTTR = 30.0                        # Mean Time To Repair: 30 minutes on average
 # -> availability = MTBF / (MTBF + MTTR) = 480 / 510 = about 94%
 
+# Energy: electric power of a machine in each state (kW).
+POWER_KW = {"busy": 15.0, "idle": 5.0, "broken": 1.0}
+# Time-of-use electricity price (EUR per kWh): expensive in the daytime, cheap at night.
+PEAK_START, PEAK_END = 8, 20       # daytime = 08:00 to 20:00
+PEAK_PRICE, OFF_PEAK_PRICE = 0.30, 0.10
+RECHECK = 5.0                      # minutes before a waiting machine looks at its queue again
+
+
+def electricity_price(t):
+    """Electricity price (EUR/kWh) at simulation time t (minutes). The simulation starts at midnight."""
+    hour = (t / 60) % 24
+    return PEAK_PRICE if PEAK_START <= hour < PEAK_END else OFF_PEAK_PRICE
+
 
 class Part:
     """One part (job). Its random data is drawn once, when it arrives."""
@@ -51,12 +64,20 @@ class Machine:
         self.state = "idle"
         self.state_since = 0.0
         self.time_in_state = {"idle": 0.0, "busy": 0.0, "broken": 0.0}
+        self.energy_kwh = 0.0
+        self.energy_cost = 0.0
         self.process = env.process(self.run())   # the machine's life cycle
         env.process(self.breakdowns())           # a second process that causes failures
 
     def set_state(self, new_state):
-        """Change state and add the time spent in the old state to the statistics."""
-        self.time_in_state[self.state] += self.env.now - self.state_since
+        """Change state. The time and energy of the old state are added to the statistics.
+        (The price is constant inside one period, because ProductionLine.tariff_changes()
+        also calls this method at every price change, like a meter reading.)"""
+        duration = self.env.now - self.state_since
+        kwh = POWER_KW[self.state] * duration / 60
+        self.time_in_state[self.state] += duration
+        self.energy_kwh += kwh
+        self.energy_cost += kwh * electricity_price(self.state_since)
         self.state = new_state
         self.state_since = self.env.now
 
@@ -70,21 +91,26 @@ class Machine:
         """The machine's life cycle: wait for work -> pick a part -> process it -> pass it on.
         A failure can interrupt it at any moment (while idle or while busy)."""
         while True:
-            # 1) If the queue is empty, sleep until add_part() wakes us up.
-            while not self.queue:
-                self.set_state("idle")
-                self.wake_up = self.env.event()
-                try:
-                    yield self.wake_up
-                except simpy.Interrupt as failure:     # broke down while idle
-                    yield from self.repair(failure.cause)
-
-            # 2) Choose the next part with the line's dispatching rule (FIFO, SPT or EDD).
-            part = self.line.rule(self.queue, self)
+            # 1) Choose the next part with the line's dispatching rule. The rule may also
+            #    return None = "wait" (the energy-aware ECO rule does this in expensive hours).
+            part = None
+            while part is None:
+                if self.queue:
+                    part = self.line.rule(self.queue, self)
+                if part is None:
+                    # Stay idle until add_part() (or a price change) wakes us up. If the rule
+                    # said "wait", also look again after RECHECK minutes (a part may become urgent).
+                    self.set_state("idle")
+                    self.wake_up = self.env.event()
+                    wait = self.wake_up | self.env.timeout(RECHECK) if self.queue else self.wake_up
+                    try:
+                        yield wait
+                    except simpy.Interrupt as failure:     # broke down while idle
+                        yield from self.repair(failure.cause)
             self.queue.remove(part)
             self.line.log(f"{part.id:>4} starts on {self.name}")
 
-            # 3) Process the part. If a failure interrupts us, we keep the work already
+            # 2) Process the part. If a failure interrupts us, we keep the work already
             #    done, wait for the repair, and then continue with the remaining time.
             remaining = part.proc_times[self.index]
             while remaining > 0:
@@ -97,7 +123,7 @@ class Machine:
                     remaining -= self.env.now - start
                     yield from self.repair(failure.cause)
 
-            # 4) Send the part to the next machine (or out of the line).
+            # 3) Send the part to the next machine (or out of the line).
             self.line.part_done(part, self.index)
 
     def repair(self, duration):
@@ -128,6 +154,27 @@ class ProductionLine:
         self.machines = [Machine(env, i, self, seed) for i in range(NUM_MACHINES)]
         self.finished = []                        # parts that left the line
         env.process(self.arrivals())
+        env.process(self.tariff_changes())
+
+    def expensive_now(self):
+        return electricity_price(self.env.now) == PEAK_PRICE
+
+    def tariff_changes(self):
+        """At every price change: close the energy periods of all machines (meter reading)
+        and wake up machines that are waiting, so they can react to the new price."""
+        while True:
+            hour = (self.env.now / 60) % 24
+            if hour < PEAK_START:
+                next_change = PEAK_START
+            elif hour < PEAK_END:
+                next_change = PEAK_END
+            else:
+                next_change = PEAK_START + 24
+            yield self.env.timeout((next_change - hour) * 60)
+            for m in self.machines:
+                m.set_state(m.state)
+                if m.wake_up is not None and not m.wake_up.triggered:
+                    m.wake_up.succeed()
 
     def log(self, message):
         if self.verbose:
@@ -173,3 +220,7 @@ if __name__ == "__main__":
         print(f"  Average lead time: {sum(lead_times) / len(done):.1f} min")
         print(f"  Average tardiness: {sum(tardiness) / len(done):.1f} min")
         print(f"  Tardy parts:       {sum(t > 0 for t in tardiness) / len(done):.0%}")
+        for m in line.machines:
+            m.set_state(m.state)   # close the last open period
+        print(f"  Energy: {sum(m.energy_kwh for m in line.machines):.0f} kWh, "
+              f"cost {sum(m.energy_cost for m in line.machines):.2f} EUR")

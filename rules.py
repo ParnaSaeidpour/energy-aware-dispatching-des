@@ -25,5 +25,20 @@ def edd(queue, machine):
     return min(queue, key=lambda part: part.due_date)
 
 
+SLACK_LIMIT = 0.0    # minutes: a part with less slack than this is "urgent" (0 = no time buffer left)
+
+
+def eco(queue, machine):
+    """Energy-aware rule: like EDD, but when electricity is expensive the machine only
+    starts urgent parts. Other parts wait for the cheap night hours.
+    Returns None = "wait, do not start a part now"."""
+    part = edd(queue, machine)
+    if not machine.line.expensive_now():
+        return part
+    # Slack = time left until the due date minus the work still to do on this and later machines.
+    slack = part.due_date - machine.env.now - sum(part.proc_times[machine.index:])
+    return part if slack < SLACK_LIMIT else None
+
+
 # All rules by name, so other files can loop over them.
-RULES = {"FIFO": fifo, "SPT": spt, "EDD": edd}
+RULES = {"FIFO": fifo, "SPT": spt, "EDD": edd, "ECO": eco}
