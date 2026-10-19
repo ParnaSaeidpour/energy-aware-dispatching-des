@@ -8,6 +8,8 @@ import random
 
 import simpy
 
+from rules import RULES
+
 # ---------------- Model parameters ----------------
 NUM_MACHINES = 3
 MEAN_INTERARRIVAL = 10.0           # average minutes between two part arrivals
@@ -77,8 +79,9 @@ class Machine:
                 except simpy.Interrupt as failure:     # broke down while idle
                     yield from self.repair(failure.cause)
 
-            # 2) Choose the next part. For now: first in, first out (FIFO).
-            part = self.queue.pop(0)
+            # 2) Choose the next part with the line's dispatching rule (FIFO, SPT or EDD).
+            part = self.line.rule(self.queue, self)
+            self.queue.remove(part)
             self.line.log(f"{part.id:>4} starts on {self.name}")
 
             # 3) Process the part. If a failure interrupts us, we keep the work already
@@ -117,8 +120,9 @@ class Machine:
 class ProductionLine:
     """Creates the machines and the part arrivals, and collects finished parts."""
 
-    def __init__(self, env, seed=1, verbose=False):
+    def __init__(self, env, rule=RULES["FIFO"], seed=1, verbose=False):
         self.env = env
+        self.rule = rule                          # dispatching rule used by every machine
         self.verbose = verbose
         self.arrival_rng = random.Random(seed)   # own random stream for arrivals and part data
         self.machines = [Machine(env, i, self, seed) for i in range(NUM_MACHINES)]
@@ -155,18 +159,17 @@ if __name__ == "__main__":
     ProductionLine(env, seed=42, verbose=True)
     env.run(until=60)
 
-    env = simpy.Environment()
-    line = ProductionLine(env, seed=42)
+    # Same seed for every rule -> same parts and same failures (a fair comparison).
     sim_time = 7 * 24 * 60
-    env.run(until=sim_time)
+    for name, rule in RULES.items():
+        env = simpy.Environment()
+        line = ProductionLine(env, rule=rule, seed=42)
+        env.run(until=sim_time)
 
-    done = line.finished
-    lead_times = [p.finish_time - p.arrival_time for p in done]
-    tardiness = [max(0.0, p.finish_time - p.due_date) for p in done]
-    print(f"\nOne week: {len(done)} parts finished")
-    print(f"Average lead time: {sum(lead_times) / len(done):.1f} min")
-    print(f"Average tardiness: {sum(tardiness) / len(done):.1f} min")
-    for m in line.machines:
-        m.set_state(m.state)   # close the last open state period
-        shares = ", ".join(f"{s} {t / sim_time:.0%}" for s, t in m.time_in_state.items())
-        print(f"{m.name}: {shares}, failures: {m.num_failures}, waiting at end: {len(m.queue)}")
+        done = line.finished
+        lead_times = [p.finish_time - p.arrival_time for p in done]
+        tardiness = [max(0.0, p.finish_time - p.due_date) for p in done]
+        print(f"\n{name} - one week: {len(done)} parts finished")
+        print(f"  Average lead time: {sum(lead_times) / len(done):.1f} min")
+        print(f"  Average tardiness: {sum(tardiness) / len(done):.1f} min")
+        print(f"  Tardy parts:       {sum(t > 0 for t in tardiness) / len(done):.0%}")
