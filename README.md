@@ -47,7 +47,7 @@ throughput (144 parts/day), utilizations (60 / 80 / 60%) and availability (MTBF 
 Requires Python 3.10 or newer.
 
 ```bash
-git clone https://github.com/<your-username>/energy-aware-dispatching-des.git
+git clone https://github.com/ParnaSaeidpour/energy-aware-dispatching-des.git
 cd energy-aware-dispatching-des
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
